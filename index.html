@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DON’T MOVE — Audio Prototype 0.1</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; color: #cfcfcf; font-family: monospace; overflow: hidden; }
+  #app { height: 100%; display: flex; flex-direction: column; justify-content: center; align-items: center; padding: 24px; text-align: center; }
+  h1 { font-size: 22px; letter-spacing: 6px; margin-bottom: 8px; }
+  p { max-width: 620px; line-height: 1.5; }
+  button { background: #111; color: #cfcfcf; border: 1px solid #444; padding: 14px 22px; margin: 8px; font-family: monospace; font-size: 16px; cursor: pointer; }
+  button:disabled { opacity: .35; cursor: default; }
+  #status { margin-top: 18px; font-size: 12px; opacity: .55; min-height: 18px; }
+  #controls { margin-top: 24px; }
+  #walkBtn { min-width: 160px; }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+<div id="app">
+  <h1>DON’T MOVE</h1>
+  <p id="intro">
+    A voice is hiding somewhere you cannot see.<br><br>
+    It can hear your footsteps.<br>
+    Use headphones if possible.
+  </p>
+  <div id="startButtons">
+    <button id="startBtn">BEGIN</button>
+    <button id="motionBtn">ENABLE REAL STEPS</button>
+  </div>
+  <div id="game" class="hidden">
+    <div id="choices"></div>
+    <div id="controls">
+      <button id="walkBtn">HOLD TO WALK</button>
+      <button id="speakBtn">WHISPER: “I’M HERE”</button>
+    </div>
+    <div id="status"></div>
+  </div>
+</div>
+<script>
+let audioCtx, ambientGain, noiseBuffer;
+let walking = false, suspicion = 0, gameActive = false, searchActive = false;
+const statusEl = document.getElementById("status");
+const choicesEl = document.getElementById("choices");
+const walkBtn = document.getElementById("walkBtn");
+const speakBtn = document.getElementById("speakBtn");
+const gameEl = document.getElementById("game");
+const introEl = document.getElementById("intro");
+const startButtons = document.getElementById("startButtons");
+
+function initAudio() {
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  const length = audioCtx.sampleRate * 2;
+  noiseBuffer = audioCtx.createBuffer(1, length, audioCtx.sampleRate);
+  const data = noiseBuffer.getChannelData(0);
+  for (let i = 0; i < length; i++) data[i] = Math.random() * 2 - 1;
+  const ambient = audioCtx.createBufferSource();
+  ambient.buffer = noiseBuffer;
+  ambient.loop = true;
+  const filter = audioCtx.createBiquadFilter();
+  filter.type = "lowpass";
+  filter.frequency.value = 420;
+  ambientGain = audioCtx.createGain();
+  ambientGain.gain.value = 0.035;
+  ambient.connect(filter); filter.connect(ambientGain); ambientGain.connect(audioCtx.destination);
+  ambient.start();
+}
+
+function playFootstep(pan = 0, volume = 0.16) {
+  const src = audioCtx.createBufferSource(); src.buffer = noiseBuffer;
+  const filter = audioCtx.createBiquadFilter(); filter.type = "bandpass"; filter.frequency.value = 180 + Math.random() * 90; filter.Q.value = 1.2;
+  const gain = audioCtx.createGain(); const panner = audioCtx.createStereoPanner(); panner.pan.value = pan;
+  gain.gain.setValueAtTime(volume, audioCtx.currentTime);
+  gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.16);
+  src.connect(filter); filter.connect(gain); gain.connect(panner); panner.connect(audioCtx.destination);
+  src.start(); src.stop(audioCtx.currentTime + 0.2);
+}
+
+function playStatic(volume = 0.12, duration = 0.5) {
+  const src = audioCtx.createBufferSource(); src.buffer = noiseBuffer;
+  const filter = audioCtx.createBiquadFilter(); filter.type = "highpass"; filter.frequency.value = 1800;
+  const gain = audioCtx.createGain();
+  gain.gain.setValueAtTime(volume, audioCtx.currentTime);
+  gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + duration);
+  src.connect(filter); filter.connect(gain); gain.connect(audioCtx.destination);
+  src.start(); src.stop(audioCtx.currentTime + duration);
+}
+
+function speak(text, opts = {}) {
+  return new Promise(resolve => {
+    const u = new SpeechSynthesisUtterance(text);
+    u.rate = opts.rate || 0.92; u.pitch = opts.pitch || 0.9; u.volume = opts.volume || 1;
+    u.onend = resolve; u.onerror = resolve;
+    speechSynthesis.speak(u);
+  });
+}
+
+function setStatus(t) { statusEl.textContent = t; }
+function clearChoices() { choicesEl.innerHTML = ""; }
+function addChoice(label, action) { const b = document.createElement("button"); b.textContent = label; b.onclick = action; choicesEl.appendChild(b); }
+function wait(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+function startWalking() {
+  if (!gameActive || walking) return;
+  walking = true; walkBtn.textContent = "WALKING…"; walkLoop();
+}
+function stopWalking() { walking = false; walkBtn.textContent = "HOLD TO WALK"; }
+
+async function walkLoop() {
+  while (walking && gameActive) {
+    playFootstep((Math.random() - 0.5) * 0.25, searchActive ? 0.22 : 0.14);
+    if (searchActive) { suspicion = Math.min(100, suspicion + 7); updateDanger(); }
+    await wait(430);
+  }
+}
+
+function updateDanger() {
+  if (suspicion > 75) setStatus("You hear movement directly outside the door.");
+  else if (suspicion > 45) setStatus("The footsteps outside are closer.");
+  else if (suspicion > 15) setStatus("Something shifts in the next room.");
+  else setStatus("The building is quiet.");
+}
+
+async function hiddenVoiceSay(text, opts = {}) {
+  playStatic(0.05, 0.18);
+  await speak(text, { pitch: 1.05, rate: 0.88, volume: opts.volume || 1 });
+}
+async function searcherSay(text) {
+  playStatic(0.08, 0.25);
+  await speak(text, { pitch: 0.65, rate: 0.82, volume: 0.85 });
+}
+async function searcherFootsteps(count = 4) {
+  for (let i = 0; i < count; i++) { playFootstep(-0.7 + (i / count) * 1.4, 0.2); await wait(520); }
+}
+
+async function beginStory() {
+  gameActive = true;
+  introEl.classList.add("hidden"); startButtons.classList.add("hidden"); gameEl.classList.remove("hidden");
+  setStatus("Connection opening…");
+  await wait(900); playStatic(0.14, 1.2); await wait(500);
+  await hiddenVoiceSay("Hello?");
+  await hiddenVoiceSay("Is… is someone there?");
+  clearChoices();
+  addChoice("Say: “Hello?”", answerHello);
+  addChoice("Say nothing", staySilentIntro);
+}
+
+async function answerHello() {
+  clearChoices();
+  await hiddenVoiceSay("Oh. Oh, thank god.");
+  await hiddenVoiceSay("I thought I was alone again.");
+  await hiddenVoiceSay("Wait. I can hear footsteps.");
+  setStatus("Your footsteps are carrying into their hiding place.");
+  await hiddenVoiceSay("Stop. Please. Just for a moment.");
+  addChoice("Stop walking", stopForThem);
+  walkBtn.disabled = false;
+}
+
+async function staySilentIntro() {
+  clearChoices();
+  await wait(1600);
+  await hiddenVoiceSay("Please. I know you can hear me.");
+  await wait(1200);
+  await hiddenVoiceSay("I can hear you walking.");
+  await hiddenVoiceSay("Please stop. They listen too.");
+  addChoice("Stop walking", stopForThem);
+  walkBtn.disabled = false;
+}
+
+async function stopForThem() {
+  clearChoices(); stopWalking(); walkBtn.disabled = true;
+  await wait(1400);
+  await hiddenVoiceSay("Thank you.");
+  await hiddenVoiceSay("I don’t know where I am. There are walls. Pipes. A door that is not mine.");
+  await hiddenVoiceSay("Someone comes sometimes. I hide when they do.");
+  await hiddenVoiceSay("If you can hear me… you might be the only person who can.");
+  addChoice("Ask: “Who is looking for you?”", askWho);
+  addChoice("Ask: “Are you safe?”", askSafe);
+}
+
+async function askWho() {
+  clearChoices();
+  await hiddenVoiceSay("I don’t know. I only know their shoes.");
+  await searcherFootsteps(3);
+  await hiddenVoiceSay("Wait.");
+  await hiddenVoiceSay("They’re coming.", { volume: 0.75 });
+  beginSearch();
+}
+
+async function askSafe() {
+  clearChoices();
+  await hiddenVoiceSay("No.");
+  await wait(700);
+  await hiddenVoiceSay("But I am quiet. I have learned to be quiet.");
+  await searcherFootsteps(3);
+  await hiddenVoiceSay("Wait. They’re coming.", { volume: 0.75 });
+  beginSearch();
+}
+
+async function beginSearch() {
+  searchActive = true; suspicion = 10; walkBtn.disabled = false; speakBtn.disabled = false;
+  clearChoices(); setStatus("A search has begun. Stay still. Stay quiet.");
+  await searcherSay("Room twelve. Check the panels.");
+  await searcherFootsteps(4);
+  await hiddenVoiceSay("Don’t move.", { volume: 0.6 });
+  await hiddenVoiceSay("Please.", { volume: 0.5 });
+  await wait(2500);
+  if (suspicion >= 60) await captureEnding(); else await nearDiscovery();
+}
+
+async function nearDiscovery() {
+  clearChoices(); searchActive = false;
+  await searcherFootsteps(2);
+  await searcherSay("Nothing. Again.");
+  await wait(1000);
+  await hiddenVoiceSay("They’re leaving.", { volume: 0.65 });
+  await wait(1200);
+  await hiddenVoiceSay("You stayed. You actually stayed.");
+  await hiddenVoiceSay("I need to tell you something before the signal changes.");
+  await hiddenVoiceSay("There is another voice in here with me. Sometimes it speaks to me. Sometimes it speaks about me.");
+  await hiddenVoiceSay("I think it knows you can hear us.");
+  addChoice("Whisper: “I hear you both.”", hearBoth);
+  addChoice("Stay silent", silentAfterSearch);
+}
+
+async function hearBoth() {
+  clearChoices(); suspicion += 12;
+  playStatic(0.16, 0.6);
+  await hiddenVoiceSay("No—quiet. Please.", { volume: 0.55 });
+  await wait(900);
+  await searcherSay("Did you hear that?");
+  await wait(1200);
+  if (suspicion >= 60) await captureEnding();
+  else { await hiddenVoiceSay("It’s gone. For now.", { volume: 0.6 }); await finalHook(); }
+}
+
+async function silentAfterSearch() {
+  clearChoices();
+  await wait(1800);
+  await hiddenVoiceSay("You’re still there, aren’t you?", { volume: 0.65 });
+  await wait(1000);
+  await hiddenVoiceSay("Good. Don’t answer. Just… stay.");
+  await finalHook();
+}
+
+async function captureEnding() {
+  searchActive = false; clearChoices(); walkBtn.disabled = true; speakBtn.disabled = true;
+  playStatic(0.25, 1.5);
+  await searcherSay("There. Behind the access panel.");
+  await wait(900);
+  await hiddenVoiceSay("No. No, no—", { volume: 0.7 });
+  await wait(700); playStatic(0.3, 2); await wait(1600);
+  await hiddenVoiceSay("If you can still hear me…", { volume: 0.45 });
+  await wait(1200);
+  await hiddenVoiceSay("Find me.", { volume: 0.35 });
+  setStatus("CONNECTION LOST — PROTOTYPE ENDING: CAPTURED");
+  gameActive = false;
+}
+
+async function finalHook() {
+  clearChoices(); walkBtn.disabled = true; speakBtn.disabled = true;
+  await hiddenVoiceSay("If they move me, I may not be able to reach you again.", { volume: 0.6 });
+  await wait(1000);
+  await hiddenVoiceSay("Don’t take me out yet. I don’t know what happens if you do.", { volume: 0.55 });
+  await wait(1400); playStatic(0.12, 1.4);
+  setStatus("PROTOTYPE ENDING: THE VOICE IS STILL HIDING");
+  gameActive = false;
+}
+
+document.getElementById("startBtn").onclick = () => { initAudio(); beginStory(); };
+
+document.getElementById("motionBtn").onclick = async () => {
+  try {
+    if (typeof DeviceMotionEvent !== "undefined" && DeviceMotionEvent.requestPermission) {
+      const permission = await DeviceMotionEvent.requestPermission();
+      if (permission !== "granted") { setStatus("Motion access denied. Use the WALK button instead."); return; }
+    }
+    setStatus("Real-step detection enabled. Walk gently; the voice will hear you.");
+    window.addEventListener("devicemotion", event => {
+      const a = event.accelerationIncludingGravity;
+      if (!a || !gameActive) return;
+      const force = Math.abs(a.x) + Math.abs(a.y) + Math.abs(a.z);
+      if (force > 24 && !walking) {
+        walking = true; walkBtn.textContent = "WALKING…"; walkLoop();
+        clearTimeout(window._stepTimeout);
+        window._stepTimeout = setTimeout(() => { walking = false; walkBtn.textContent = "HOLD TO WALK"; }, 900);
+      }
+    });
+  } catch (e) { setStatus("Motion unavailable. Use the WALK button instead."); }
+};
+
+walkBtn.addEventListener("mousedown", startWalking);
+walkBtn.addEventListener("touchstart", e => { e.preventDefault(); startWalking(); });
+window.addEventListener("mouseup", stopWalking);
+window.addEventListener("touchend", stopWalking);
+document.addEventListener("keydown", e => { if (e.code === "Space") { e.preventDefault(); startWalking(); } });
+document.addEventListener("keyup", e => { if (e.code === "Space") stopWalking(); });
+speakBtn.onclick = async () => {
+  if (!gameActive) return;
+  playStatic(0.07, 0.3);
+  await hiddenVoiceSay("I’m here.", { volume: 0.35 });
+  if (searchActive) { suspicion += 18; updateDanger(); }
+};
+</script>
+</body>
+</html>
